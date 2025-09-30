@@ -9,13 +9,13 @@
 #include <EEPROM.h>
 #include <Preferences.h>
 #include <Adafruit_NeoPixel.h>
-#include <string.h> // Pridėta dėl memset
+#include <string.h>
 
 // ==================== KONSTANTOS ====================
 #define BUTTON_PIN 0
 #define LED_PIN 35
 #define VIBRO_PIN 19
-#define NEOPIXEL_PIN 38 // Heltec V3 vidinio RGB LED kaištis
+#define NEOPIXEL_PIN 38
 
 #define OLED_SDA 17
 #define OLED_SCL 18
@@ -37,9 +37,11 @@
 
 #define VIBRO_DURATION 100
 #define VIBRO_PAUSE 100
+#define VIBRO_TARGET_COUNT 2
 #define VIBRO_NEW_COUNT 10
-#define VIBRO_KNOWN_COUNT 3
-#define VIBRO_COOLDOWN 1800000
+#define VIBRO_LONG_UNSEEN_COUNT 5
+#define VIBRO_REENTER_COUNT 1
+#define VIBRO_COOLDOWN 3600000 // 60 minučių
 
 #define BATTERY_PIN 1
 #define BATTERY_MIN 2500
@@ -91,6 +93,8 @@ bool buttonPressed = false, longPressDetected = false;
 int hiddenNetworksFound = 0, currentPage = 0;
 bool scanning = false;
 HiddenNetwork hiddenNetworks[MAX_HIDDEN_NETWORKS];
+String previouslySeenBssids[MAX_HIDDEN_NETWORKS]; // Praėjusio ciklo tinklai
+int previouslySeenCount = 0;
 int menuSelection = 0, deleteSelection = 1;
 int savedBssidCount = 0, currentSavedPage = 0;
 unsigned long infoScreenStartTime = 0;
@@ -125,8 +129,8 @@ String getBSSIDFromPreferences(int index);
 void deleteAllBSSIDs();
 String formatMacAddress(String bssid);
 void powerDown();
-void vibrateMultiple(int times);
-void handleVibration(String bssid, bool isNew);
+void vibrate(int times);
+void handleVibration(const HiddenNetwork& network);
 void displayBatteryIcon(int x, int y);
 
 // ==================== SISTEMA IR INICIALIZACIJA ====================
@@ -230,7 +234,7 @@ void startScan() {
   scanConfig.scan_type = WIFI_SCAN_TYPE_ACTIVE;
   scanConfig.scan_time.active.min = 100;
   scanConfig.scan_time.active.max = 120;
-  scanConfig.channel = 0; // Skenuoti visus kanalus
+  scanConfig.channel = 0;
 
   if (esp_wifi_scan_start(&scanConfig, false) == ESP_OK) {
     scanning = true;
@@ -238,19 +242,26 @@ void startScan() {
 }
 
 void scanHiddenNetworks() {
-  int n = WiFi.scanComplete(); // Gauname rezultatų skaičių
+  uint16_t n = 0;
+  esp_wifi_scan_get_ap_num(&n);
+
   hiddenNetworksFound = 0;
   currentTargetColor = 0;
 
   if (n > 0) {
-    for (int i = 0; i < n && hiddenNetworksFound < MAX_HIDDEN_NETWORKS; i++) {
-      if (WiFi.SSID(i).length() == 0) {
-        String bssid = WiFi.BSSIDstr(i);
+    wifi_ap_record_t* list = (wifi_ap_record_t*)malloc(sizeof(wifi_ap_record_t) * n);
+    esp_wifi_scan_get_ap_records(&n, list);
+
+    for (uint16_t i = 0; i < n && hiddenNetworksFound < MAX_HIDDEN_NETWORKS; i++) {
+      if (strlen((char*)list[i].ssid) == 0) {
+        char bssid_str[18];
+        sprintf(bssid_str, "%02X:%02X:%02X:%02X:%02X:%02X", list[i].bssid[0], list[i].bssid[1], list[i].bssid[2], list[i].bssid[3], list[i].bssid[4], list[i].bssid[5]);
+        String bssid = String(bssid_str);
 
         hiddenNetworks[hiddenNetworksFound].bssid = bssid;
-        hiddenNetworks[hiddenNetworksFound].rssi = WiFi.RSSI(i);
+        hiddenNetworks[hiddenNetworksFound].rssi = list[i].rssi;
         hiddenNetworks[hiddenNetworksFound].isTarget = false;
-        hiddenNetworks[hiddenNetworksFound].isNew = false;
+        hiddenNetworks[hiddenNetworksFound].isNew = !isBSSIDSaved(bssid);
         hiddenNetworks[hiddenNetworksFound].targetName = "";
 
         for (const auto& target : targets) {
@@ -262,20 +273,16 @@ void scanHiddenNetworks() {
           }
         }
 
-        if (!hiddenNetworks[hiddenNetworksFound].isTarget) {
-          bool isNew = !isBSSIDSaved(bssid);
-          if (isNew) {
-            hiddenNetworks[hiddenNetworksFound].isNew = true;
-            saveBSSID(bssid);
-            handleVibration(bssid, true);
-          } else {
-            handleVibration(bssid, false);
-          }
+        handleVibration(hiddenNetworks[hiddenNetworksFound]);
+
+        if (!hiddenNetworks[hiddenNetworksFound].isTarget && hiddenNetworks[hiddenNetworksFound].isNew) {
+          saveBSSID(bssid);
         }
 
         hiddenNetworksFound++;
       }
     }
+    free(list);
 
     for (int i = 0; i < hiddenNetworksFound - 1; i++) {
       for (int j = i + 1; j < hiddenNetworksFound; j++) {
@@ -288,7 +295,6 @@ void scanHiddenNetworks() {
     }
   }
 
-  WiFi.scanDelete();
   scanning = false;
 
   if (deviceState == ACTIVE) {
@@ -297,9 +303,15 @@ void scanHiddenNetworks() {
     }
     updateDisplay();
   }
+
+  // Atnaujiname praėjusio ciklo matytų tinklų sąrašą
+  previouslySeenCount = hiddenNetworksFound;
+  for(int i=0; i<hiddenNetworksFound; i++){
+    previouslySeenBssids[i] = hiddenNetworks[i].bssid;
+  }
 }
 
-// ==================== EKRANO VALDYMAS (PATAISYTA) ====================
+// ==================== EKRANO VALDYMAS ====================
 void updateDisplay() {
   if (deviceState != ACTIVE || showingInfoScreen) return;
 
@@ -607,7 +619,7 @@ void powerDown() {
   esp_deep_sleep_start();
 }
 
-void vibrateMultiple(int times) {
+void vibrate(int times) {
   for (int i = 0; i < times; i++) {
     digitalWrite(VIBRO_PIN, HIGH); delay(VIBRO_DURATION);
     digitalWrite(VIBRO_PIN, LOW);
@@ -615,23 +627,55 @@ void vibrateMultiple(int times) {
   }
 }
 
-void handleVibration(String bssid, bool isNew) {
+void handleVibration(const HiddenNetwork& network) {
   unsigned long currentTime = millis();
-  if (isNew) { vibrateMultiple(VIBRO_NEW_COUNT); return; }
+
+  // 1. Specialusis "tikinys"
+  if (network.isTarget) {
+    vibrate(VIBRO_TARGET_COUNT);
+    return;
+  }
+
+  // 2. Visiškai naujas tinklas
+  if (network.isNew) {
+    vibrate(VIBRO_NEW_COUNT);
+    // Įrašome pradinį laiką, kad išvengtume 5 vibracijų iškart po aptikimo
+    for (int i = 0; i < vibroStatesCount; i++) {
+      if (vibroStates[i].bssid == network.bssid) {
+        vibroStates[i].lastVibroTime = currentTime;
+        return;
+      }
+    }
+    if (vibroStatesCount < MAX_VIBRO_STATES) {
+      vibroStates[vibroStatesCount].bssid = network.bssid;
+      vibroStates[vibroStatesCount].lastVibroTime = currentTime;
+      vibroStatesCount++;
+    }
+    return;
+  }
+
+  // 3. Ilgai nematytas tinklas
+  bool wasSeenInLastScan = false;
+  for(int i = 0; i < previouslySeenCount; i++){
+    if(previouslySeenBssids[i] == network.bssid){
+      wasSeenInLastScan = true;
+      break;
+    }
+  }
+
   for (int i = 0; i < vibroStatesCount; i++) {
-    if (vibroStates[i].bssid == bssid) {
+    if (vibroStates[i].bssid == network.bssid) {
       if (currentTime - vibroStates[i].lastVibroTime > VIBRO_COOLDOWN) {
         vibroStates[i].lastVibroTime = currentTime;
-        vibrateMultiple(VIBRO_KNOWN_COUNT);
+        vibrate(VIBRO_LONG_UNSEEN_COUNT);
+        return;
+      }
+      // 4. Grįžimas į zoną
+      if(!wasSeenInLastScan){
+        vibrate(VIBRO_REENTER_COUNT);
       }
       return;
     }
-  }
-  if (vibroStatesCount < MAX_VIBRO_STATES) {
-    vibroStates[vibroStatesCount].bssid = bssid;
-    vibroStates[vibroStatesCount].lastVibroTime = currentTime;
-    vibroStatesCount++;
-    vibrateMultiple(VIBRO_KNOWN_COUNT);
   }
 }
 
