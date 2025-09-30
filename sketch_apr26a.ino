@@ -42,7 +42,6 @@
 #define VIBRO_TARGET_COUNT 2
 #define VIBRO_NEW_COUNT 10
 #define VIBRO_LONG_UNSEEN_COUNT 5
-#define VIBRO_REENTER_COUNT 1
 #define VIBRO_COOLDOWN 3600000 // 60 minučių
 
 #define BATTERY_PIN 1
@@ -94,8 +93,6 @@ unsigned long currentScanInterval = SLOW_SCAN_INTERVAL;
 int hiddenNetworksFound = 0, currentPage = 0;
 bool scanning = false;
 HiddenNetwork hiddenNetworks[MAX_HIDDEN_NETWORKS];
-String previouslySeenBssids[MAX_HIDDEN_NETWORKS];
-int previouslySeenCount = 0;
 int menuSelection = 0, deleteSelection = 1;
 int savedBssidCount = 0;
 int currentSavedPage = 0;
@@ -275,11 +272,6 @@ void scanHiddenNetworks(int n) {
       currentPage = 0;
     }
     updateDisplay();
-  }
-
-  previouslySeenCount = hiddenNetworksFound;
-  for(int i=0; i<hiddenNetworksFound; i++){
-    previouslySeenBssids[i] = hiddenNetworks[i].bssid;
   }
 }
 
@@ -644,36 +636,20 @@ void handleVibration(const HiddenNetwork& network) {
     return;
   }
 
-  // Iškviečiame `saveNewBssid` TIK tada, kai `isNew` yra tiesa,
-  // ir tai darome pačioje `handleVibration` funkcijoje,
-  // kad užtikrintume atominę operaciją.
   if (network.isNew) {
     vibrate(VIBRO_NEW_COUNT);
     saveNewBssid(network.bssid);
     return;
   }
 
-  // Jei tinklas nėra naujas, tikriname kitas sąlygas
   int index = findBssidIndex(network.bssid);
-  // Papildomas patikrinimas, nors teoriškai neturėtų įvykti
   if (index == -1) return;
 
   unsigned long lastSeen = getBssidTimestamp(index);
   if (millis() - lastSeen > VIBRO_COOLDOWN) {
     vibrate(VIBRO_LONG_UNSEEN_COUNT);
-    updateBssidTimestamp(index); // Atnaujiname laiką
+    updateBssidTimestamp(index);
     return;
-  }
-
-  bool wasSeenInLastScan = false;
-  for(int i = 0; i < previouslySeenCount; i++){
-    if(previouslySeenBssids[i] == network.bssid){
-      wasSeenInLastScan = true;
-      break;
-    }
-  }
-  if(!wasSeenInLastScan){
-    vibrate(VIBRO_REENTER_COUNT);
   }
 }
 
