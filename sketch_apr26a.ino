@@ -93,7 +93,7 @@ bool buttonPressed = false, longPressDetected = false;
 int hiddenNetworksFound = 0, currentPage = 0;
 bool scanning = false;
 HiddenNetwork hiddenNetworks[MAX_HIDDEN_NETWORKS];
-String previouslySeenBssids[MAX_HIDDEN_NETWORKS]; // Praėjusio ciklo tinklai
+String previouslySeenBssids[MAX_HIDDEN_NETWORKS];
 int previouslySeenCount = 0;
 int menuSelection = 0, deleteSelection = 1;
 int savedBssidCount = 0, currentSavedPage = 0;
@@ -103,8 +103,13 @@ uint32_t currentTargetColor = 0;
 unsigned long lastBlinkTime = 0;
 bool targetLedState = false;
 
+// Asinchroninės vibracijos kintamieji
+int vibration_count_remaining = 0;
+unsigned long last_vibration_time = 0;
+bool vibrator_on = false;
+
 // ==================== FUNKCIJŲ PROTOTIPAI ====================
-void startScan();
+void handleAsyncVibration();
 void scanHiddenNetworks();
 void updateDisplay();
 void showMainMenu();
@@ -188,6 +193,7 @@ void setup() {
 void loop() {
   if (deviceState == POWERING_OFF) { powerDown(); return; }
   handleButton();
+  handleAsyncVibration(); // Kviečiame asinchroninės vibracijos valdiklį
 
   if (currentTargetColor != 0) {
     if (millis() - lastBlinkTime > BLINK_INTERVAL) {
@@ -210,12 +216,13 @@ void loop() {
     return;
   }
 
-  if (scanning) {
-    int scanResult = WiFi.scanComplete();
-    if (scanResult >= 0) {
-      scanHiddenNetworks();
-    }
-  } else {
+  int scanResult = WiFi.scanComplete();
+  if (scanResult >= 0 && !scanning) {
+    scanHiddenNetworks();
+  } else if (scanResult == WIFI_SCAN_RUNNING) {
+    // Skenavimas vis dar vyksta
+  } else if (!scanning) {
+    // Pradedame naują skenavimą, jei senas baigtas
     switch (deviceState) {
       case ACTIVE: handleActiveState(); break;
       case DISPLAY_OFF: handleDisplayOffState(); break;
@@ -224,42 +231,20 @@ void loop() {
   delay(10);
 }
 
-// ==================== SKENERIO VALDYMAS (OPTIMIZUOTAS) ====================
-void startScan() {
-  if (scanning) return;
-
-  wifi_scan_config_t scanConfig;
-  memset(&scanConfig, 0, sizeof(scanConfig));
-  scanConfig.show_hidden = true;
-  scanConfig.scan_type = WIFI_SCAN_TYPE_ACTIVE;
-  scanConfig.scan_time.active.min = 100;
-  scanConfig.scan_time.active.max = 120;
-  scanConfig.channel = 0;
-
-  if (esp_wifi_scan_start(&scanConfig, false) == ESP_OK) {
-    scanning = true;
-  }
-}
-
+// ==================== SKENERIO VALDYMAS (STABILUS IR OPTIMIZUOTAS) ====================
 void scanHiddenNetworks() {
-  uint16_t n = 0;
-  esp_wifi_scan_get_ap_num(&n);
-
+  scanning = true;
+  int n = WiFi.scanComplete();
   hiddenNetworksFound = 0;
   currentTargetColor = 0;
 
   if (n > 0) {
-    wifi_ap_record_t* list = (wifi_ap_record_t*)malloc(sizeof(wifi_ap_record_t) * n);
-    esp_wifi_scan_get_ap_records(&n, list);
-
-    for (uint16_t i = 0; i < n && hiddenNetworksFound < MAX_HIDDEN_NETWORKS; i++) {
-      if (strlen((char*)list[i].ssid) == 0) {
-        char bssid_str[18];
-        sprintf(bssid_str, "%02X:%02X:%02X:%02X:%02X:%02X", list[i].bssid[0], list[i].bssid[1], list[i].bssid[2], list[i].bssid[3], list[i].bssid[4], list[i].bssid[5]);
-        String bssid = String(bssid_str);
+    for (int i = 0; i < n && hiddenNetworksFound < MAX_HIDDEN_NETWORKS; i++) {
+      if (WiFi.SSID(i).length() == 0) {
+        String bssid = WiFi.BSSIDstr(i);
 
         hiddenNetworks[hiddenNetworksFound].bssid = bssid;
-        hiddenNetworks[hiddenNetworksFound].rssi = list[i].rssi;
+        hiddenNetworks[hiddenNetworksFound].rssi = WiFi.RSSI(i);
         hiddenNetworks[hiddenNetworksFound].isTarget = false;
         hiddenNetworks[hiddenNetworksFound].isNew = !isBSSIDSaved(bssid);
         hiddenNetworks[hiddenNetworksFound].targetName = "";
@@ -282,7 +267,6 @@ void scanHiddenNetworks() {
         hiddenNetworksFound++;
       }
     }
-    free(list);
 
     for (int i = 0; i < hiddenNetworksFound - 1; i++) {
       for (int j = i + 1; j < hiddenNetworksFound; j++) {
@@ -295,6 +279,7 @@ void scanHiddenNetworks() {
     }
   }
 
+  WiFi.scanDelete();
   scanning = false;
 
   if (deviceState == ACTIVE) {
@@ -304,7 +289,6 @@ void scanHiddenNetworks() {
     updateDisplay();
   }
 
-  // Atnaujiname praėjusio ciklo matytų tinklų sąrašą
   previouslySeenCount = hiddenNetworksFound;
   for(int i=0; i<hiddenNetworksFound; i++){
     previouslySeenBssids[i] = hiddenNetworks[i].bssid;
@@ -551,16 +535,18 @@ void handleVeryLongPress() {
 
 void handleActiveState() {
   if (currentMenu == SCANNING) {
-    if (!scanning) {
-      startScan();
+    int scanStatus = WiFi.scanComplete();
+    if (scanStatus != WIFI_SCAN_RUNNING) {
+      WiFi.scanNetworks(true, true, false, 120);
     }
   }
 }
 
 void handleDisplayOffState() {
-  if (!scanning) {
-    startScan();
-  }
+    int scanStatus = WiFi.scanComplete();
+    if (scanStatus != WIFI_SCAN_RUNNING) {
+      WiFi.scanNetworks(true, true, false, 120);
+    }
 }
 
 void setDeviceState(DeviceState newState) {
@@ -620,32 +606,41 @@ void powerDown() {
 }
 
 void vibrate(int times) {
-  for (int i = 0; i < times; i++) {
-    digitalWrite(VIBRO_PIN, HIGH); delay(VIBRO_DURATION);
-    digitalWrite(VIBRO_PIN, LOW);
-    if (i < times - 1) delay(VIBRO_PAUSE);
+  if (vibration_count_remaining > 0) return; // Jei jau vibruoja, nepradedam naujos sekos
+  vibration_count_remaining = times;
+}
+
+void handleAsyncVibration() {
+  if (vibration_count_remaining == 0) return;
+
+  unsigned long currentTime = millis();
+  if (vibrator_on) {
+    if (currentTime - last_vibration_time >= VIBRO_DURATION) {
+      digitalWrite(VIBRO_PIN, LOW);
+      vibrator_on = false;
+      last_vibration_time = currentTime;
+      vibration_count_remaining--;
+    }
+  } else {
+    if (currentTime - last_vibration_time >= VIBRO_PAUSE) {
+      digitalWrite(VIBRO_PIN, HIGH);
+      vibrator_on = true;
+      last_vibration_time = currentTime;
+    }
   }
 }
+
 
 void handleVibration(const HiddenNetwork& network) {
   unsigned long currentTime = millis();
 
-  // 1. Specialusis "tikinys"
   if (network.isTarget) {
     vibrate(VIBRO_TARGET_COUNT);
     return;
   }
 
-  // 2. Visiškai naujas tinklas
   if (network.isNew) {
     vibrate(VIBRO_NEW_COUNT);
-    // Įrašome pradinį laiką, kad išvengtume 5 vibracijų iškart po aptikimo
-    for (int i = 0; i < vibroStatesCount; i++) {
-      if (vibroStates[i].bssid == network.bssid) {
-        vibroStates[i].lastVibroTime = currentTime;
-        return;
-      }
-    }
     if (vibroStatesCount < MAX_VIBRO_STATES) {
       vibroStates[vibroStatesCount].bssid = network.bssid;
       vibroStates[vibroStatesCount].lastVibroTime = currentTime;
@@ -654,7 +649,6 @@ void handleVibration(const HiddenNetwork& network) {
     return;
   }
 
-  // 3. Ilgai nematytas tinklas
   bool wasSeenInLastScan = false;
   for(int i = 0; i < previouslySeenCount; i++){
     if(previouslySeenBssids[i] == network.bssid){
@@ -670,7 +664,6 @@ void handleVibration(const HiddenNetwork& network) {
         vibrate(VIBRO_LONG_UNSEEN_COUNT);
         return;
       }
-      // 4. Grįžimas į zoną
       if(!wasSeenInLastScan){
         vibrate(VIBRO_REENTER_COUNT);
       }
