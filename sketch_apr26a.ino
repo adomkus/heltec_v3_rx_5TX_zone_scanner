@@ -49,6 +49,8 @@
 #define BATTERY_MIN 2500
 #define BATTERY_MAX 4200
 
+#define MENU_ITEM_COUNT 4
+
 // ==================== TIPAI IR OBJEKTAI ====================
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RST);
 Preferences preferences;
@@ -310,10 +312,8 @@ void updateDisplay() {
           display.setCursor(0, 18 + (i - startIdx) * 12);
 
           if (hiddenNetworks[i].isTarget) {
-            display.setTextColor(BLACK, WHITE);
-            String targetText = hiddenNetworks[i].targetName + " (" + String(rssi) + ")";
+            String targetText = "* " + hiddenNetworks[i].targetName + " (" + String(rssi) + ")";
             display.print(targetText);
-            display.setTextColor(WHITE, BLACK);
           } else {
             String mac = formatMacAddress(hiddenNetworks[i].bssid);
             display.print(mac + " (" + String(rssi) + ")");
@@ -351,7 +351,7 @@ void showMainMenu() {
   display.println("== MENIU ==");
   display.println("-------------------");
   const char* menuItems[] = {"SARASAS", "ISTRINTI VISUS", "SKEN. GREITIS", "GRIZTI"};
-  for (int i = 0; i < 4; i++) {
+  for (int i = 0; i < MENU_ITEM_COUNT; i++) {
     display.setCursor(10, 18 + i * 12);
     display.print((i == menuSelection) ? "> " : "  ");
     display.println(menuItems[i]);
@@ -471,7 +471,7 @@ void handleShortClick() {
   if (deviceState == DISPLAY_OFF) { setDeviceState(ACTIVE); return; }
   switch (currentMenu) {
     case SCANNING: if (hiddenNetworksFound > NETWORKS_PER_PAGE) { currentPage = (currentPage + 1) % ((hiddenNetworksFound + NETWORKS_PER_PAGE - 1) / NETWORKS_PER_PAGE); } break;
-    case MENU_MAIN: menuSelection = (menuSelection + 1) % 4; break;
+    case MENU_MAIN: menuSelection = (menuSelection + 1) % MENU_ITEM_COUNT; break;
     case SAVED_LIST: if (savedBssidCount > NETWORKS_PER_PAGE) { currentSavedPage = (currentSavedPage + 1) % ((savedBssidCount + NETWORKS_PER_PAGE - 1) / NETWORKS_PER_PAGE); } break;
     case DELETE_CONFIRM: deleteSelection = (deleteSelection + 1) % 2; break;
   }
@@ -534,7 +534,7 @@ void handleVeryLongPress() {
 void handleActiveState() {
   if (currentMenu == SCANNING && !scanning && (millis() - lastScanTime > currentScanInterval)) {
     scanning = true;
-    WiFi.scanNetworks(false, true, false, 300); // Pasyvus skenavimas greitesnis
+    WiFi.scanNetworks(true, true, false, 120);
     lastScanTime = millis();
   }
 }
@@ -542,7 +542,7 @@ void handleActiveState() {
 void handleDisplayOffState() {
     if (!scanning && (millis() - lastScanTime > currentScanInterval)) {
     scanning = true;
-    WiFi.scanNetworks(false, true, false, 300);
+    WiFi.scanNetworks(true, true, false, 120);
     lastScanTime = millis();
   }
 }
@@ -644,15 +644,20 @@ void handleVibration(const HiddenNetwork& network) {
     return;
   }
 
-  int index = findBssidIndex(network.bssid);
-  if (index == -1) { // Visiškai naujas
+  // Iškviečiame `saveNewBssid` TIK tada, kai `isNew` yra tiesa,
+  // ir tai darome pačioje `handleVibration` funkcijoje,
+  // kad užtikrintume atominę operaciją.
+  if (network.isNew) {
     vibrate(VIBRO_NEW_COUNT);
-    // Išsaugome IŠKART, kad išvengtume pasikartojimo
     saveNewBssid(network.bssid);
     return;
   }
 
-  // Jei tinklas nėra naujas, patikriname kitas sąlygas
+  // Jei tinklas nėra naujas, tikriname kitas sąlygas
+  int index = findBssidIndex(network.bssid);
+  // Papildomas patikrinimas, nors teoriškai neturėtų įvykti
+  if (index == -1) return;
+
   unsigned long lastSeen = getBssidTimestamp(index);
   if (millis() - lastSeen > VIBRO_COOLDOWN) {
     vibrate(VIBRO_LONG_UNSEEN_COUNT);
