@@ -55,25 +55,27 @@ Adafruit_NeoPixel pixel(1, NEOPIXEL_PIN, NEO_GRB + NEO_KHZ800);
 struct Target {
   const char* bssid;
   uint32_t color;
+  const char* name; // Pridedamas pavadinimas
 };
 
 Target targets[] = {
-  { "B8:F8:62:04:7E:05", pixel.Color(255, 0, 0)   },
-  { "B8:F8:62:04:66:8D", pixel.Color(0, 255, 0)   },
-  { "B8:F8:62:04:64:29", pixel.Color(0, 0, 255)   },
-  { "7C:2C:67:D4:0F:C1", pixel.Color(255, 255, 0) },
-  { "B8:F8:62:04:62:91", pixel.Color(255, 0, 255) }
+  { "B8:F8:62:04:7E:05", pixel.Color(255, 0, 0),   "RAUDONAS" },
+  { "B8:F8:62:04:66:8D", pixel.Color(0, 255, 0),   "ZALIAS"   },
+  { "B8:F8:62:04:64:29", pixel.Color(0, 0, 255),   "MELYNAS"  },
+  { "7C:2C:67:D4:0F:C1", pixel.Color(255, 255, 0), "GELTONAS" },
+  { "B8:F8:62:04:62:91", pixel.Color(255, 0, 255), "VIOLETINIS" }
 };
 
 enum DeviceState { ACTIVE, DISPLAY_OFF, POWERING_OFF };
 enum MenuState { SCANNING, MENU_MAIN, SAVED_LIST, DELETE_CONFIRM };
 
 // PATOBULINTA DUOMENŲ STRUKTŪRA
-struct HiddenNetwork { 
-  String bssid; 
-  int rssi; 
+struct HiddenNetwork {
+  String bssid;
+  int rssi;
   bool isNew;
   bool isTarget; // Požymis, ar tai specialusis tinklas
+  String targetName; // Specialiojo tinklo pavadinimas
 };
 
 struct VibroState { String bssid; unsigned long lastVibroTime; };
@@ -103,10 +105,34 @@ unsigned long lastBlinkTime = 0;
 bool targetLedState = false;
 
 // ==================== FUNKCIJŲ PROTOTIPAI ====================
-// ... (prototipai lieka nepakitę) ...
 void scanHiddenNetworks();
 void updateDisplay();
-// ...
+void showMainMenu();
+void showSavedList();
+void showDeleteConfirmation();
+void showTemporaryMessage(String msg, int duration);
+float getBatteryVoltage();
+int getBatteryPercentage();
+void handleButton();
+void handleShortClick();
+void handleDoubleClick();
+void handleLongPress();
+void handleVeryLongPress();
+void handleActiveState();
+void handleDisplayOffState();
+void setDeviceState(DeviceState newState);
+void displaySleep();
+void displayWake();
+void saveBSSID(String bssid);
+bool isBSSIDSaved(String bssid);
+String getBSSIDFromPreferences(int index);
+void deleteAllBSSIDs();
+String formatMacAddress(String bssid);
+void powerDown();
+void vibrateMultiple(int times);
+void handleVibration(String bssid, bool isNew);
+void displayBatteryIcon(int x, int y);
+
 
 // ==================== SISTEMA IR INICIALIZACIJA ====================
 void setup() {
@@ -130,7 +156,7 @@ void setup() {
   digitalWrite(OLED_RST, LOW); delay(20); digitalWrite(OLED_RST, HIGH);
   Wire.begin(OLED_SDA, OLED_SCL);
   if(!display.begin(SSD1306_SWITCHCAPVCC, OLED_ADDR)) { for(;;); }
-  
+
   display.setTextColor(WHITE);
 
   preferences.begin("wifi_scanner", false);
@@ -210,23 +236,22 @@ void scanHiddenNetworks() {
     for (int i = 0; i < n && hiddenNetworksFound < MAX_HIDDEN_NETWORKS; i++) {
       if (WiFi.SSID(i).length() == 0) {
         String bssid = WiFi.BSSIDstr(i);
-        
-        // Priskiriame tinklo duomenis į masyvą
+
         hiddenNetworks[hiddenNetworksFound].bssid = bssid;
         hiddenNetworks[hiddenNetworksFound].rssi = WiFi.RSSI(i);
-        hiddenNetworks[hiddenNetworksFound].isTarget = false; // Nustatome kaip ne specialųjį pagal nutylėjimą
-        hiddenNetworks[hiddenNetworksFound].isNew = false; // Nustatome kaip ne naują pagal nutylėjimą
+        hiddenNetworks[hiddenNetworksFound].isTarget = false;
+        hiddenNetworks[hiddenNetworksFound].isNew = false;
+        hiddenNetworks[hiddenNetworksFound].targetName = "";
 
-        // Tikriname, ar BSSID yra specialiųjų sąraše
         for (const auto& target : targets) {
-          if (bssid.equalsIgnoreCase(target.bssid)) { // Naudojame patikimesnį palyginimą
+          if (bssid.equalsIgnoreCase(target.bssid)) {
             currentTargetColor = target.color;
             hiddenNetworks[hiddenNetworksFound].isTarget = true;
+            hiddenNetworks[hiddenNetworksFound].targetName = target.name;
             break;
           }
         }
 
-        // Jei tinklas NĖRA specialusis, apdorojame jį kaip įprasta
         if (!hiddenNetworks[hiddenNetworksFound].isTarget) {
           bool isNew = !isBSSIDSaved(bssid);
           if (isNew) {
@@ -237,12 +262,11 @@ void scanHiddenNetworks() {
             handleVibration(bssid, false);
           }
         }
-        
-        hiddenNetworksFound++; // Didiname rastų tinklų skaitiklį
+
+        hiddenNetworksFound++;
       }
     }
-    
-    // Rūšiavimas pagal RSSI (specialieji tinklai bus rūšiuojami kartu su kitais)
+
     for (int i = 0; i < hiddenNetworksFound - 1; i++) {
       for (int j = i + 1; j < hiddenNetworksFound; j++) {
         if (hiddenNetworks[i].rssi < hiddenNetworks[j].rssi) {
@@ -256,7 +280,7 @@ void scanHiddenNetworks() {
   } else {
     currentScanInterval = SLOW_SCAN_INTERVAL;
   }
-  
+
   WiFi.scanDelete();
   scanning = false;
 
@@ -278,38 +302,39 @@ void updateDisplay() {
       display.clearDisplay();
       display.setTextColor(WHITE);
       display.setTextSize(1);
-      
+
       display.setCursor(0, 0);
       display.print("A:" + String(hiddenNetworksFound) + " ");
       display.print((currentScanInterval == FAST_SCAN_INTERVAL) ? "G:" : "L:");
       display.print(String(currentScanInterval));
-      
+
       displayBatteryIcon(100, 0);
-      
+
       display.setCursor(0, 9);
       display.println("-------------------");
 
       if (hiddenNetworksFound > 0) {
         int startIdx = currentPage * NETWORKS_PER_PAGE;
         int endIdx = min(startIdx + NETWORKS_PER_PAGE, hiddenNetworksFound);
-        
+
         for (int i = startIdx; i < endIdx; i++) {
-          String mac = formatMacAddress(hiddenNetworks[i].bssid);
           int rssi = hiddenNetworks[i].rssi;
           display.setCursor(0, 18 + (i - startIdx) * 12);
-          
+
           if (hiddenNetworks[i].isTarget) {
-            display.setTextColor(BLACK, WHITE); // Inversinė spalva specialiajam tinklui
-            display.print("[TIKINYS] " + String(rssi));
-            display.setTextColor(WHITE, BLACK); // Atstatome spalvą
+            display.setTextColor(BLACK, WHITE);
+            String targetText = hiddenNetworks[i].targetName + " (" + String(rssi) + ")";
+            display.print(targetText);
+            display.setTextColor(WHITE, BLACK);
           } else {
+            String mac = formatMacAddress(hiddenNetworks[i].bssid);
             display.print(mac + " (" + String(rssi) + ")");
             if (hiddenNetworks[i].isNew) {
               display.print(" *");
             }
           }
         }
-        
+
         if (hiddenNetworksFound > NETWORKS_PER_PAGE) {
             int totalPages = (hiddenNetworksFound + NETWORKS_PER_PAGE - 1) / NETWORKS_PER_PAGE;
             String pageInfo = String(currentPage + 1) + "/" + String(totalPages);
@@ -318,21 +343,18 @@ void updateDisplay() {
         }
       } else {
         display.setCursor(20, 35);
-        display.print("Ieskoma...");
+        display.print("Ieskomi tinklai...");
       }
       display.display();
       break;
-      
+
     case MENU_MAIN: showMainMenu(); break;
     case SAVED_LIST: showSavedList(); break;
     case DELETE_CONFIRM: showDeleteConfirmation(); break;
   }
 }
 
-// ==================== LIKĘS KODAS (nepakitęs) ====================
-// Čia pateikiamos visos kitos funkcijos, kurios lieka nepakitusios.
-// ... (visos kitos funkcijos, tokios kaip handleButton, showMainMenu, powerDown ir t.t.) ...
-
+// ==================== LIKĘS KODAS (su pataisymais) ====================
 void showMainMenu() {
   display.clearDisplay();
   display.setTextColor(WHITE);
@@ -354,7 +376,7 @@ void showSavedList() {
   display.setTextColor(WHITE);
   display.setTextSize(1);
   display.setCursor(0, 0);
-  display.println("Issaugota: " + String(savedBssidCount));
+  display.println("Isaugota: " + String(savedBssidCount));
   display.println("-------------------");
   int startIdx = currentSavedPage * NETWORKS_PER_PAGE;
   int endIdx = min(startIdx + NETWORKS_PER_PAGE, savedBssidCount);
@@ -378,7 +400,7 @@ void showDeleteConfirmation() {
   display.setTextSize(1);
   display.setCursor(0, 8);
   display.println("Istrinti visus " + String(savedBssidCount));
-  display.println("issaug. adresus?");
+  display.println("isaug. adresus?");
   display.setTextSize(2);
   display.setCursor(15, 40);
   display.print((deleteSelection == 0) ? "> TAIP" : "  TAIP");
@@ -510,7 +532,7 @@ void handleVeryLongPress() {
   display.println("-------------------");
   display.println("Baterija: " + String(getBatteryPercentage()) + "%");
   display.println("Aptikta: " + String(hiddenNetworksFound));
-  display.println("Issaugota: " + String(savedBssidCount));
+  display.println("Isaugota: " + String(savedBssidCount));
   display.println("\nHeltec WiFi Skeneris");
   display.display();
 }
