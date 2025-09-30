@@ -9,6 +9,7 @@
 #include <EEPROM.h>
 #include <Preferences.h>
 #include <Adafruit_NeoPixel.h>
+#include <string.h> // Pridėta dėl memset
 
 // ==================== KONSTANTOS ====================
 #define BUTTON_PIN 0
@@ -23,10 +24,7 @@
 #define SCREEN_HEIGHT 64
 #define OLED_ADDR 0x3C
 
-#define FAST_SCAN_INTERVAL 500
-#define SLOW_SCAN_INTERVAL 2500
 #define NETWORKS_PER_PAGE 4
-
 #define LONG_PRESS_TIME 1000
 #define VERY_LONG_PRESS_TIME 3000
 #define SUPER_LONG_PRESS_TIME 5000
@@ -55,7 +53,7 @@ Adafruit_NeoPixel pixel(1, NEOPIXEL_PIN, NEO_GRB + NEO_KHZ800);
 struct Target {
   const char* bssid;
   uint32_t color;
-  const char* name; // Pridedamas pavadinimas
+  const char* name;
 };
 
 Target targets[] = {
@@ -69,13 +67,12 @@ Target targets[] = {
 enum DeviceState { ACTIVE, DISPLAY_OFF, POWERING_OFF };
 enum MenuState { SCANNING, MENU_MAIN, SAVED_LIST, DELETE_CONFIRM };
 
-// PATOBULINTA DUOMENŲ STRUKTŪRA
 struct HiddenNetwork {
   String bssid;
   int rssi;
   bool isNew;
-  bool isTarget; // Požymis, ar tai specialusis tinklas
-  String targetName; // Specialiojo tinklo pavadinimas
+  bool isTarget;
+  String targetName;
 };
 
 struct VibroState { String bssid; unsigned long lastVibroTime; };
@@ -91,9 +88,7 @@ unsigned long lastDebounceTime = 0, debounceDelay = 50;
 unsigned long pressStartTime = 0, lastClickTime = 0;
 int pendingClicks = 0;
 bool buttonPressed = false, longPressDetected = false;
-unsigned long lastScanTime = 0;
 int hiddenNetworksFound = 0, currentPage = 0;
-unsigned long currentScanInterval = SLOW_SCAN_INTERVAL;
 bool scanning = false;
 HiddenNetwork hiddenNetworks[MAX_HIDDEN_NETWORKS];
 int menuSelection = 0, deleteSelection = 1;
@@ -105,6 +100,7 @@ unsigned long lastBlinkTime = 0;
 bool targetLedState = false;
 
 // ==================== FUNKCIJŲ PROTOTIPAI ====================
+void startScan();
 void scanHiddenNetworks();
 void updateDisplay();
 void showMainMenu();
@@ -132,7 +128,6 @@ void powerDown();
 void vibrateMultiple(int times);
 void handleVibration(String bssid, bool isNew);
 void displayBatteryIcon(int x, int y);
-
 
 // ==================== SISTEMA IR INICIALIZACIJA ====================
 void setup() {
@@ -215,7 +210,6 @@ void loop() {
     int scanResult = WiFi.scanComplete();
     if (scanResult >= 0) {
       scanHiddenNetworks();
-      lastScanTime = millis();
     }
   } else {
     switch (deviceState) {
@@ -226,9 +220,25 @@ void loop() {
   delay(10);
 }
 
-// ==================== SKENERIO VALDYMAS (PATAISYTA) ====================
+// ==================== SKENERIO VALDYMAS (OPTIMIZUOTAS) ====================
+void startScan() {
+  if (scanning) return;
+
+  wifi_scan_config_t scanConfig;
+  memset(&scanConfig, 0, sizeof(scanConfig));
+  scanConfig.show_hidden = true;
+  scanConfig.scan_type = WIFI_SCAN_TYPE_ACTIVE;
+  scanConfig.scan_time.active.min = 100;
+  scanConfig.scan_time.active.max = 120;
+  scanConfig.channel = 0; // Skenuoti visus kanalus
+
+  if (esp_wifi_scan_start(&scanConfig, false) == ESP_OK) {
+    scanning = true;
+  }
+}
+
 void scanHiddenNetworks() {
-  int n = WiFi.scanComplete();
+  int n = WiFi.scanComplete(); // Gauname rezultatų skaičių
   hiddenNetworksFound = 0;
   currentTargetColor = 0;
 
@@ -276,9 +286,6 @@ void scanHiddenNetworks() {
         }
       }
     }
-    currentScanInterval = FAST_SCAN_INTERVAL;
-  } else {
-    currentScanInterval = SLOW_SCAN_INTERVAL;
   }
 
   WiFi.scanDelete();
@@ -292,7 +299,6 @@ void scanHiddenNetworks() {
   }
 }
 
-
 // ==================== EKRANO VALDYMAS (PATAISYTA) ====================
 void updateDisplay() {
   if (deviceState != ACTIVE || showingInfoScreen) return;
@@ -304,9 +310,7 @@ void updateDisplay() {
       display.setTextSize(1);
 
       display.setCursor(0, 0);
-      display.print("A:" + String(hiddenNetworksFound) + " ");
-      display.print((currentScanInterval == FAST_SCAN_INTERVAL) ? "G:" : "L:");
-      display.print(String(currentScanInterval));
+      display.print("Aptikta: " + String(hiddenNetworksFound));
 
       displayBatteryIcon(100, 0);
 
@@ -362,8 +366,8 @@ void showMainMenu() {
   display.setCursor(0, 0);
   display.println("== MENIU ==");
   display.println("-------------------");
-  const char* menuItems[] = {"SARASAS", "ISTRINTI VISUS", "SKEN. GREITIS", "GRIZTI"};
-  for (int i = 0; i < 4; i++) {
+  const char* menuItems[] = {"SARASAS", "ISTRINTI VISUS", "GRIZTI"};
+  for (int i = 0; i < 3; i++) {
     display.setCursor(10, 18 + i * 12);
     display.print((i == menuSelection) ? "> " : "  ");
     display.println(menuItems[i]);
@@ -477,7 +481,7 @@ void handleShortClick() {
   if (deviceState == DISPLAY_OFF) { setDeviceState(ACTIVE); return; }
   switch (currentMenu) {
     case SCANNING: if (hiddenNetworksFound > NETWORKS_PER_PAGE) { currentPage = (currentPage + 1) % ((hiddenNetworksFound + NETWORKS_PER_PAGE - 1) / NETWORKS_PER_PAGE); } break;
-    case MENU_MAIN: menuSelection = (menuSelection + 1) % 4; break;
+    case MENU_MAIN: menuSelection = (menuSelection + 1) % 3; break;
     case SAVED_LIST: if (savedBssidCount > NETWORKS_PER_PAGE) { currentSavedPage = (currentSavedPage + 1) % ((savedBssidCount + NETWORKS_PER_PAGE - 1) / NETWORKS_PER_PAGE); } break;
     case DELETE_CONFIRM: deleteSelection = (deleteSelection + 1) % 2; break;
   }
@@ -502,11 +506,7 @@ void handleLongPress() {
       switch (menuSelection) {
         case 0: currentMenu = SAVED_LIST; currentSavedPage = 0; break;
         case 1: currentMenu = DELETE_CONFIRM; deleteSelection = 1; break;
-        case 2:
-          currentScanInterval = (currentScanInterval == FAST_SCAN_INTERVAL) ? SLOW_SCAN_INTERVAL : FAST_SCAN_INTERVAL;
-          showTemporaryMessage((currentScanInterval == FAST_SCAN_INTERVAL) ? "Greitas sken." : "Letas sken.", 1000);
-          return;
-        case 3: currentMenu = SCANNING; break;
+        case 2: currentMenu = SCANNING; break;
       }
       break;
     case DELETE_CONFIRM:
@@ -539,19 +539,15 @@ void handleVeryLongPress() {
 
 void handleActiveState() {
   if (currentMenu == SCANNING) {
-    if (!scanning && (millis() - lastScanTime > currentScanInterval)) {
-      scanning = true;
-      WiFi.scanNetworks(true, true);
-      lastScanTime = millis();
+    if (!scanning) {
+      startScan();
     }
   }
 }
 
 void handleDisplayOffState() {
-  if (!scanning && (millis() - lastScanTime > currentScanInterval)) {
-    scanning = true;
-    WiFi.scanNetworks(true, true);
-    lastScanTime = millis();
+  if (!scanning) {
+    startScan();
   }
 }
 
