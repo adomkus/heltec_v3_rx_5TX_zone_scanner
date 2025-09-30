@@ -604,8 +604,11 @@ void powerDown() {
 }
 
 void vibrate(int times) {
-  if (vibration_count_remaining > 0) return;
-  vibration_count_remaining = times;
+  // Leidžiame naujai, svarbesnei vibracijai (daugiau impulsų)
+  // nutraukti ir pakeisti esamą, mažiau svarbią.
+  if (times > vibration_count_remaining) {
+    vibration_count_remaining = times;
+  }
 }
 
 void handleAsyncVibration() {
