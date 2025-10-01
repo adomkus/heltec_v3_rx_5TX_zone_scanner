@@ -216,6 +216,7 @@ void scanHiddenNetworks(int n) {
       if (WiFi.SSID(i).length() == 0) {
         String bssid = WiFi.BSSIDstr(i);
 
+        // "Protingas" skenavimas: apdorojame kiekvieną unikalų BSSID tik vieną kartą per ciklą.
         bool alreadyProcessed = false;
         for (int j = 0; j < processedCount; j++) {
           if (processedBssids[j] == bssid) {
