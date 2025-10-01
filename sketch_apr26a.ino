@@ -8,7 +8,7 @@
 #include <Adafruit_SSD1306.h>
 #include <EEPROM.h>
 #include <Preferences.h>
-#include <Adafruit_NeoPixel.h>
+#include <Adafruit_NeoPixel.hh>
 #include <string.h>
 
 // ==================== KONSTANTOS ====================
@@ -632,24 +632,31 @@ void handleAsyncVibration() {
 }
 
 void handleVibration(const HiddenNetwork& network) {
+  // 1. Tikslinis tinklas (aukščiausias prioritetas)
   if (network.isTarget) {
     vibrate(VIBRO_TARGET_COUNT);
     return;
   }
 
+  // 2. Visiškai naujas tinklas
   if (network.isNew) {
-    vibrate(VIBRO_NEW_COUNT);
-    saveNewBssid(network.bssid);
+    // Vibruojame TIK JEI yra vietos atmintyje, kad išvengtume begalinio ciklo
+    if (savedBssidCount < MAX_SAVED_BSSIDS) {
+      vibrate(VIBRO_NEW_COUNT);
+      saveNewBssid(network.bssid); // Išsaugome iškart po vibracijos inicijavimo
+    }
     return;
   }
 
+  // 3. Žinomas tinklas
   int index = findBssidIndex(network.bssid);
-  if (index == -1) return;
+  if (index == -1) return; // Saugumo patikrinimas
 
+  // Patikriname, ar tinklas nebuvo matytas ilgą laiką
   unsigned long lastSeen = getBssidTimestamp(index);
   if (millis() - lastSeen > VIBRO_COOLDOWN) {
     vibrate(VIBRO_LONG_UNSEEN_COUNT);
-    updateBssidTimestamp(index);
+    updateBssidTimestamp(index); // Atnaujiname laiką, kad ciklas nepasikartotų
     return;
   }
 }
