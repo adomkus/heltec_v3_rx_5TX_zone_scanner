@@ -8,14 +8,12 @@
 #include <Adafruit_SSD1306.h>
 #include <EEPROM.h>
 #include <Preferences.h>
-#include <Adafruit_NeoPixel.hh>
 #include <string.h>
 
 // ==================== KONSTANTOS ====================
 #define BUTTON_PIN 0
 #define LED_PIN 35
 #define VIBRO_PIN 19
-#define NEOPIXEL_PIN 38
 
 #define OLED_SDA 17
 #define OLED_SCL 18
@@ -31,8 +29,6 @@
 #define VERY_LONG_PRESS_TIME 3000
 #define SUPER_LONG_PRESS_TIME 5000
 #define MULTI_CLICK_WINDOW 400
-#define BLINK_INTERVAL 300
-#define DEBUG false
 
 #define MAX_SAVED_BSSIDS 100
 #define MAX_HIDDEN_NETWORKS 12
@@ -53,20 +49,18 @@
 // ==================== TIPAI IR OBJEKTAI ====================
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RST);
 Preferences preferences;
-Adafruit_NeoPixel pixel(1, NEOPIXEL_PIN, NEO_GRB + NEO_KHZ800);
 
 struct Target {
   const char* bssid;
-  uint32_t color;
   const char* name;
 };
 
 Target targets[] = {
-  { "B8:F8:62:04:7E:05", pixel.Color(255, 0, 0),   "RAUDONAS" },
-  { "B8:F8:62:04:66:8D", pixel.Color(0, 255, 0),   "ZALIAS"   },
-  { "B8:F8:62:04:64:29", pixel.Color(0, 0, 255),   "MELYNAS"  },
-  { "7C:2C:67:D4:0F:C1", pixel.Color(255, 255, 0), "GELTONAS" },
-  { "B8:F8:62:04:62:91", pixel.Color(255, 0, 255), "VIOLETINIS" }
+  { "B8:F8:62:04:7E:05", "RAUDONAS" },
+  { "B8:F8:62:04:66:8D", "ZALIAS"   },
+  { "B8:F8:62:04:64:29", "MELYNAS"  },
+  { "7C:2C:67:D4:0F:C1", "GELTONAS" },
+  { "B8:F8:62:04:62:91", "VIOLETINIS" }
 };
 
 enum DeviceState { ACTIVE, DISPLAY_OFF, POWERING_OFF };
@@ -98,10 +92,8 @@ int savedBssidCount = 0;
 int currentSavedPage = 0;
 unsigned long infoScreenStartTime = 0;
 bool showingInfoScreen = false;
-uint32_t currentTargetColor = 0;
-unsigned long lastBlinkTime = 0;
-bool targetLedState = false;
 
+// Asinchroninės vibracijos kintamieji
 int vibration_count_remaining = 0;
 unsigned long last_vibration_time = 0;
 bool vibrator_on = false;
@@ -145,10 +137,6 @@ void setup() {
   pinMode(VIBRO_PIN, OUTPUT);
   digitalWrite(LED_PIN, LOW);
   digitalWrite(VIBRO_PIN, LOW);
-
-  pixel.begin();
-  pixel.clear();
-  pixel.show();
 
   analogReadResolution(12);
   #if defined(ESP32)
@@ -194,19 +182,6 @@ void loop() {
   handleButton();
   handleAsyncVibration();
 
-  if (currentTargetColor != 0) {
-    if (millis() - lastBlinkTime > BLINK_INTERVAL) {
-      lastBlinkTime = millis();
-      targetLedState = !targetLedState;
-      pixel.setPixelColor(0, targetLedState ? currentTargetColor : 0);
-      pixel.show();
-    }
-  } else if (targetLedState) {
-    pixel.clear();
-    pixel.show();
-    targetLedState = false;
-  }
-
   if (showingInfoScreen) {
     if (millis() - infoScreenStartTime > 2000) {
       showingInfoScreen = false;
@@ -233,12 +208,26 @@ void loop() {
 // ==================== SKENERIO VALDYMAS ====================
 void scanHiddenNetworks(int n) {
   hiddenNetworksFound = 0;
-  currentTargetColor = 0;
+  String processedBssids[MAX_HIDDEN_NETWORKS];
+  int processedCount = 0;
 
   if (n > 0) {
     for (int i = 0; i < n && hiddenNetworksFound < MAX_HIDDEN_NETWORKS; i++) {
       if (WiFi.SSID(i).length() == 0) {
         String bssid = WiFi.BSSIDstr(i);
+
+        bool alreadyProcessed = false;
+        for (int j = 0; j < processedCount; j++) {
+          if (processedBssids[j] == bssid) {
+            alreadyProcessed = true;
+            break;
+          }
+        }
+        if (alreadyProcessed) continue;
+
+        if (processedCount < MAX_HIDDEN_NETWORKS) {
+          processedBssids[processedCount++] = bssid;
+        }
 
         hiddenNetworks[hiddenNetworksFound].bssid = bssid;
         hiddenNetworks[hiddenNetworksFound].rssi = WiFi.RSSI(i);
@@ -248,7 +237,6 @@ void scanHiddenNetworks(int n) {
 
         for (const auto& target : targets) {
           if (bssid.equalsIgnoreCase(target.bssid)) {
-            currentTargetColor = target.color;
             hiddenNetworks[hiddenNetworksFound].isTarget = true;
             hiddenNetworks[hiddenNetworksFound].targetName = target.name;
             break;
@@ -586,7 +574,6 @@ String formatMacAddress(String bssid) { return bssid.substring(0, 2) + ".." + bs
 
 void powerDown() {
   deviceState = POWERING_OFF;
-  pixel.clear(); pixel.show();
   display.clearDisplay();
   display.setTextSize(2);
   display.setCursor(5, 15);
@@ -632,31 +619,26 @@ void handleAsyncVibration() {
 }
 
 void handleVibration(const HiddenNetwork& network) {
-  // 1. Tikslinis tinklas (aukščiausias prioritetas)
   if (network.isTarget) {
     vibrate(VIBRO_TARGET_COUNT);
     return;
   }
 
-  // 2. Visiškai naujas tinklas
   if (network.isNew) {
-    // Vibruojame TIK JEI yra vietos atmintyje, kad išvengtume begalinio ciklo
     if (savedBssidCount < MAX_SAVED_BSSIDS) {
       vibrate(VIBRO_NEW_COUNT);
-      saveNewBssid(network.bssid); // Išsaugome iškart po vibracijos inicijavimo
+      saveNewBssid(network.bssid);
     }
     return;
   }
 
-  // 3. Žinomas tinklas
   int index = findBssidIndex(network.bssid);
-  if (index == -1) return; // Saugumo patikrinimas
+  if (index == -1) return;
 
-  // Patikriname, ar tinklas nebuvo matytas ilgą laiką
   unsigned long lastSeen = getBssidTimestamp(index);
   if (millis() - lastSeen > VIBRO_COOLDOWN) {
     vibrate(VIBRO_LONG_UNSEEN_COUNT);
-    updateBssidTimestamp(index); // Atnaujiname laiką, kad ciklas nepasikartotų
+    updateBssidTimestamp(index);
     return;
   }
 }
